@@ -180,9 +180,3 @@ func (Domain) Locate(uriType, id string) (string, error) {
 	}
 	return "https://www.htx.com/en-us/trade/" + id + "/", nil
 }
-
-// mapErr converts a library error into the kit error kind that carries the
-// right exit code.
-func mapErr(err error) error {
-	return err
-}
