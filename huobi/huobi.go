@@ -130,9 +130,9 @@ func normalizeSymbol(s string) string {
 // Ticker holds current price and 24-hour stats for a symbol.
 type Ticker struct {
 	Symbol string  `kit:"id" json:"symbol"`
-	Last   float64 `json:"last"`    // close price
-	Bid    float64 `json:"bid"`     // best bid price
-	Ask    float64 `json:"ask"`     // best ask price
+	Last   float64 `json:"last"` // close price
+	Bid    float64 `json:"bid"`  // best bid price
+	Ask    float64 `json:"ask"`  // best ask price
 	Open   float64 `json:"open_24h"`
 	High   float64 `json:"high_24h"`
 	Low    float64 `json:"low_24h"`
@@ -161,9 +161,9 @@ type Symbol struct {
 // --- wire types (Huobi JSON shapes) ---
 
 type apiResponse struct {
-	Status string          `json:"status"`
-	ErrMsg string          `json:"err-msg"`
-	Ch     string          `json:"ch"`
+	Status string `json:"status"`
+	ErrMsg string `json:"err-msg"`
+	Ch     string `json:"ch"`
 }
 
 type wireTickerResponse struct {
