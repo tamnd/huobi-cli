@@ -1,35 +1,33 @@
 // Package huobi is the library behind the huobi command line:
-// the HTTP client, request shaping, and the typed data models for huobi.
+// the HTTP client, request shaping, and the typed data models for Huobi (HTX)
+// public market data.
 //
 // The Client here is the spine every command shares. It sets a real
 // User-Agent, paces requests so a busy session stays polite, and retries the
-// transient failures (429 and 5xx) that any public site throws under load.
-// Build your endpoint calls and JSON decoding on top of it.
+// transient failures (429 and 5xx) that any public API throws under load.
 package huobi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
+	"net/url"
 	"strings"
 	"time"
 )
 
-// DefaultUserAgent identifies the client to huobi. A real, honest
-// User-Agent is both polite and the thing most likely to keep you unblocked.
-const DefaultUserAgent = "huobi/dev (+https://github.com/tamnd/huobi-cli)"
+// DefaultUserAgent identifies the client to Huobi.
+const DefaultUserAgent = "huobi-cli/0.1 (tamnd87@gmail.com)"
 
-// Host is the site this client talks to, and the host the URI driver in
-// domain.go claims. The scaffold points it at huobi.com; change it once you
-// know the real endpoints you want to read.
-const Host = "huobi.com"
+// Host is the API host this client talks to.
+const Host = "api.huobi.pro"
 
 // BaseURL is the root every request is built from.
 const BaseURL = "https://" + Host
 
-// Client talks to huobi over HTTP.
+// Client talks to the Huobi public API over HTTP.
 type Client struct {
 	HTTP      *http.Client
 	UserAgent string
@@ -40,21 +38,20 @@ type Client struct {
 	last time.Time
 }
 
-// NewClient returns a Client with sensible defaults: a 30s timeout, a 200ms
-// minimum gap between requests, and five retries on transient errors.
+// NewClient returns a Client with sensible defaults: a 15s timeout, a 200ms
+// minimum gap between requests, and three retries on transient errors.
 func NewClient() *Client {
 	return &Client{
-		HTTP:      &http.Client{Timeout: 30 * time.Second},
+		HTTP:      &http.Client{Timeout: 15 * time.Second},
 		UserAgent: DefaultUserAgent,
 		Rate:      200 * time.Millisecond,
-		Retries:   5,
+		Retries:   3,
 	}
 }
 
-// Get fetches url and returns the response body. It paces and retries according
-// to the client's settings. The caller owns nothing extra; the body is read
-// fully and closed here.
-func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
+// Get fetches rawURL and returns the response body. It paces and retries
+// according to the client's settings.
+func (c *Client) Get(ctx context.Context, rawURL string) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt <= c.Retries; attempt++ {
 		if attempt > 0 {
@@ -64,7 +61,7 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 			case <-time.After(backoff(attempt)):
 			}
 		}
-		body, retry, err := c.do(ctx, url)
+		body, retry, err := c.do(ctx, rawURL)
 		if err == nil {
 			return body, nil
 		}
@@ -73,12 +70,12 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 			return nil, err
 		}
 	}
-	return nil, fmt.Errorf("get %s: %w", url, lastErr)
+	return nil, fmt.Errorf("get %s: %w", rawURL, lastErr)
 }
 
-func (c *Client) do(ctx context.Context, url string) (body []byte, retry bool, err error) {
+func (c *Client) do(ctx context.Context, rawURL string) (body []byte, retry bool, err error) {
 	c.pace()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, false, err
 	}
@@ -123,78 +120,192 @@ func backoff(attempt int) time.Duration {
 	return d
 }
 
-// Page is the scaffold's one example record: a single page, addressed by the
-// path that names it on huobi.com. It is a stand-in for the typed records you
-// will model from the real huobi endpoints. The kit struct tags make it
-// addressable as a resource URI (see domain.go): ID is the URI id, and Body is
-// the long text `huobi cat` and the Markdown export print.
-type Page struct {
-	ID    string `json:"id" kit:"id"`
-	URL   string `json:"url"`
-	Title string `json:"title,omitempty"`
-	Body  string `json:"body,omitempty" kit:"body"`
+// normalizeSymbol lowercases a symbol for the Huobi API (requires lowercase).
+func normalizeSymbol(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
 }
 
-// GetPage fetches one page by its path (for example "wiki/Go") and returns it as
-// a record. The scaffold keeps a plain-text preview of the response as the body;
-// replace the parsing with the real fields once you know the endpoint's shape.
-func (c *Client) GetPage(ctx context.Context, path string) (*Page, error) {
-	path = strings.Trim(path, "/")
-	url := BaseURL + "/" + path
-	body, err := c.Get(ctx, url)
+// --- data models ---
+
+// Ticker holds current price and 24-hour stats for a symbol.
+type Ticker struct {
+	Symbol string  `kit:"id" json:"symbol"`
+	Last   float64 `json:"last"`    // close price
+	Bid    float64 `json:"bid"`     // best bid price
+	Ask    float64 `json:"ask"`     // best ask price
+	Open   float64 `json:"open_24h"`
+	High   float64 `json:"high_24h"`
+	Low    float64 `json:"low_24h"`
+	Vol    float64 `json:"vol_24h"` // quote volume
+}
+
+// Candle is one OHLCV candlestick bar.
+type Candle struct {
+	ID    int64   `kit:"id" json:"id"` // unix timestamp
+	Open  float64 `json:"open"`
+	High  float64 `json:"high"`
+	Low   float64 `json:"low"`
+	Close float64 `json:"close"`
+	Vol   float64 `json:"vol"`
+}
+
+// Symbol describes a trading pair listed on Huobi.
+type Symbol struct {
+	Symbol         string `kit:"id" json:"symbol"`
+	Base           string `json:"base"`
+	Quote          string `json:"quote"`
+	State          string `json:"state"`
+	PricePrecision int    `json:"price_precision"`
+}
+
+// --- wire types (Huobi JSON shapes) ---
+
+type apiResponse struct {
+	Status string          `json:"status"`
+	ErrMsg string          `json:"err-msg"`
+	Ch     string          `json:"ch"`
+}
+
+type wireTickerResponse struct {
+	apiResponse
+	Tick wireTick `json:"tick"`
+}
+
+type wireTick struct {
+	Open   float64   `json:"open"`
+	High   float64   `json:"high"`
+	Low    float64   `json:"low"`
+	Close  float64   `json:"close"`
+	Amount float64   `json:"amount"`
+	Vol    float64   `json:"vol"`
+	Count  int       `json:"count"`
+	Bid    []float64 `json:"bid"` // [price, size]
+	Ask    []float64 `json:"ask"` // [price, size]
+}
+
+type wireKlineResponse struct {
+	apiResponse
+	Data []wireCandle `json:"data"`
+}
+
+type wireCandle struct {
+	ID     int64   `json:"id"`
+	Open   float64 `json:"open"`
+	High   float64 `json:"high"`
+	Low    float64 `json:"low"`
+	Close  float64 `json:"close"`
+	Amount float64 `json:"amount"`
+	Vol    float64 `json:"vol"`
+	Count  int     `json:"count"`
+}
+
+type wireSymbolsResponse struct {
+	apiResponse
+	Data []wireSymbol `json:"data"`
+}
+
+type wireSymbol struct {
+	BaseCurrency    string `json:"base-currency"`
+	QuoteCurrency   string `json:"quote-currency"`
+	Symbol          string `json:"symbol"`
+	State           string `json:"state"`
+	PricePrecision  int    `json:"price-precision"`
+	AmountPrecision int    `json:"amount-precision"`
+}
+
+// --- API methods ---
+
+// GetTicker fetches current price and 24h stats for a single symbol.
+func (c *Client) GetTicker(ctx context.Context, symbol string) (*Ticker, error) {
+	symbol = normalizeSymbol(symbol)
+	u := BaseURL + "/market/detail/merged?symbol=" + url.QueryEscape(symbol)
+	body, err := c.Get(ctx, u)
 	if err != nil {
 		return nil, err
 	}
-	return &Page{ID: path, URL: url, Title: path, Body: pageText(body)}, nil
+	var resp wireTickerResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parse ticker: %w", err)
+	}
+	if resp.Status != "ok" {
+		return nil, fmt.Errorf("huobi API error: %s", resp.ErrMsg)
+	}
+	t := &Ticker{
+		Symbol: symbol,
+		Last:   resp.Tick.Close,
+		Open:   resp.Tick.Open,
+		High:   resp.Tick.High,
+		Low:    resp.Tick.Low,
+		Vol:    resp.Tick.Vol,
+	}
+	if len(resp.Tick.Bid) > 0 {
+		t.Bid = resp.Tick.Bid[0]
+	}
+	if len(resp.Tick.Ask) > 0 {
+		t.Ask = resp.Tick.Ask[0]
+	}
+	return t, nil
 }
 
-// PageLinks fetches a page and returns the same-host pages it links to, as page
-// stubs. It shows the member-listing pattern the URI driver relies on: every
-// stub carries enough (an id and a URL) to be addressed and followed on its own.
-func (c *Client) PageLinks(ctx context.Context, path string, limit int) ([]*Page, error) {
-	path = strings.Trim(path, "/")
-	body, err := c.Get(ctx, BaseURL+"/"+path)
+// GetKlines fetches candlestick data for a symbol.
+func (c *Client) GetKlines(ctx context.Context, symbol, period string, count int) ([]*Candle, error) {
+	symbol = normalizeSymbol(symbol)
+	u := fmt.Sprintf("%s/market/history/kline?symbol=%s&period=%s&size=%d",
+		BaseURL, url.QueryEscape(symbol), url.QueryEscape(period), count)
+	body, err := c.Get(ctx, u)
 	if err != nil {
 		return nil, err
 	}
-	var out []*Page
-	seen := map[string]bool{}
-	for _, p := range linkPaths(body) {
-		if seen[p] {
-			continue
-		}
-		seen[p] = true
-		out = append(out, &Page{ID: p, URL: BaseURL + "/" + p})
-		if limit > 0 && len(out) >= limit {
-			break
+	var resp wireKlineResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parse klines: %w", err)
+	}
+	if resp.Status != "ok" {
+		return nil, fmt.Errorf("huobi API error: %s", resp.ErrMsg)
+	}
+	out := make([]*Candle, len(resp.Data))
+	for i, d := range resp.Data {
+		out[i] = &Candle{
+			ID:    d.ID,
+			Open:  d.Open,
+			High:  d.High,
+			Low:   d.Low,
+			Close: d.Close,
+			Vol:   d.Vol,
 		}
 	}
 	return out, nil
 }
 
-var (
-	hrefRE = regexp.MustCompile(`href="(/[^":#?]+)"`)
-	tagRE  = regexp.MustCompile(`<[^>]+>`)
-)
-
-// linkPaths pulls the relative link targets out of an HTML response, so a list
-// op can turn each into an addressable page stub.
-func linkPaths(body []byte) []string {
-	var out []string
-	for _, m := range hrefRE.FindAllSubmatch(body, -1) {
-		if p := strings.Trim(string(m[1]), "/"); p != "" {
-			out = append(out, p)
+// GetSymbols fetches all trading pairs from the exchange, optionally filtered
+// by state and limited in count. Both filters are applied client-side.
+func (c *Client) GetSymbols(ctx context.Context, state string, limit int) ([]*Symbol, error) {
+	body, err := c.Get(ctx, BaseURL+"/v1/common/symbols")
+	if err != nil {
+		return nil, err
+	}
+	var resp wireSymbolsResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parse symbols: %w", err)
+	}
+	if resp.Status != "ok" {
+		return nil, fmt.Errorf("huobi API error: %s", resp.ErrMsg)
+	}
+	out := make([]*Symbol, 0, len(resp.Data))
+	for _, d := range resp.Data {
+		if state != "" && d.State != state {
+			continue
+		}
+		out = append(out, &Symbol{
+			Symbol:         d.Symbol,
+			Base:           d.BaseCurrency,
+			Quote:          d.QuoteCurrency,
+			State:          d.State,
+			PricePrecision: d.PricePrecision,
+		})
+		if limit > 0 && len(out) >= limit {
+			break
 		}
 	}
-	return out
-}
-
-// pageText reduces an HTML response to a short plain-text preview, a stand-in
-// for the typed extract a real endpoint would hand you.
-func pageText(body []byte) string {
-	s := strings.Join(strings.Fields(tagRE.ReplaceAllString(string(body), " ")), " ")
-	if len(s) > 500 {
-		s = s[:500]
-	}
-	return s
+	return out, nil
 }
